@@ -1,6 +1,9 @@
 import 'dart:io';
+import 'dart:ui';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:flutter/widgets.dart';
 import 'package:image_sensor/lux_sensor.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:gallery_saver/gallery_saver.dart';
@@ -50,6 +53,8 @@ class _MyHomePageState extends State<MyHomePage> {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
 
+  String imagePath = '';
+  String imageName = '';
   List<double> accelerometerValues = [0, 0, 0];
   List<double> gyroscopeValues = [0, 0, 0];
   double luxValue = 0;
@@ -132,32 +137,94 @@ class _MyHomePageState extends State<MyHomePage> {
       await _initializeControllerFuture;
 
       final image = await _controller.takePicture();
+
+      // Capture sensor values at the point of clicking the picture
+      final List<double> initialGyroscopeValues = List.from(gyroscopeValues);
+      final List<double> initialAccelerometerValues =
+          List.from(accelerometerValues);
+
       final DateTime now = DateTime.now();
       final String formattedDate = DateFormat('MM-dd-HH-mm').format(now);
-      final String imageName = formattedDate;
+      imageName = formattedDate;
       final String imageNameWithExtension = '$formattedDate.jpg';
 
       final Directory directory = await getApplicationDocumentsDirectory();
-      final String imagePath = '${directory.path}/$imageNameWithExtension';
+      imagePath = '${directory.path}/$imageNameWithExtension';
       await File(image.path).copy(imagePath);
 
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (context) => DisplayPictureScreen(
-            image: File(imagePath),
-            imageName: imageName,
-            accelerometerValues: accelerometerValues,
-            gyroscopeValues: gyroscopeValues,
-            luxValue: luxValue,
-            deviceModel: deviceModel,
-            uniqueID: uniqueID,
-          ),
-        ),
+      // Show loader with blur effect
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return Stack(
+            children: [
+              BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                child: Container(
+                  color: Colors.black.withOpacity(0.5),
+                ),
+              ),
+              const Center(
+                child: CircularProgressIndicator(),
+              ),
+            ],
+          );
+        },
+      );
+
+      // Arrays to store sensor values over 200 milliseconds
+      final List<List<double>> delayedGyroscopeValues = [];
+      final List<List<double>> delayedAccelerometerValues = [];
+
+      // Capture sensor values for 200 milliseconds
+      const int duration = 200;
+      const int interval = 5;
+      for (int i = 0; i < duration; i += interval) {
+        delayedGyroscopeValues.add(List.from(gyroscopeValues));
+        delayedAccelerometerValues.add(List.from(accelerometerValues));
+        await Future.delayed(const Duration(milliseconds: interval));
+      }
+
+      // Close the loader dialog
+      Navigator.of(context).pop();
+
+      // Navigate to the details screen with the captured values
+      _naviateToDetailsScreen(
+        delayedAccelerometerValues,
+        delayedGyroscopeValues,
+        initialAccelerometerValues,
+        initialGyroscopeValues,
       );
     } catch (e) {
-      print(e);
+      if (kDebugMode) {
+        print('Error taking picture: $e');
+      }
     }
+  }
+
+  void _naviateToDetailsScreen(
+    List<List<double>> delayedAccelerometerValues,
+    List<List<double>> delayedGyroscopeValues,
+    List<double> initialAccelerometerValues,
+    List<double> initialGyroscopeValues,
+  ) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => DisplayPictureScreen(
+          image: File(imagePath),
+          imageName: imageName,
+          delayedAccelerometerValues: delayedAccelerometerValues,
+          delayedGyroscopeValues: delayedGyroscopeValues,
+          initialAccelerometerValues: initialAccelerometerValues,
+          initialGyroscopeValues: initialGyroscopeValues,
+          luxValue: luxValue,
+          deviceModel: deviceModel,
+          uniqueID: uniqueID,
+        ),
+      ),
+    );
   }
 
   @override
@@ -182,7 +249,7 @@ class _MyHomePageState extends State<MyHomePage> {
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: _takePicture,
-        child: const Icon(Icons.camera),
+        child: const Icon(Icons.camera_alt),
       ),
     );
   }
@@ -197,8 +264,10 @@ class _MyHomePageState extends State<MyHomePage> {
 class DisplayPictureScreen extends StatelessWidget {
   final File image;
   final String imageName;
-  final List<double> accelerometerValues;
-  final List<double> gyroscopeValues;
+  final List<List<double>> delayedAccelerometerValues;
+  final List<List<double>> delayedGyroscopeValues;
+  final List<double> initialAccelerometerValues;
+  final List<double> initialGyroscopeValues;
   final String deviceModel;
   final String uniqueID;
   final num luxValue;
@@ -207,8 +276,10 @@ class DisplayPictureScreen extends StatelessWidget {
     super.key,
     required this.image,
     required this.imageName,
-    required this.accelerometerValues,
-    required this.gyroscopeValues,
+    required this.delayedAccelerometerValues,
+    required this.delayedGyroscopeValues,
+    required this.initialAccelerometerValues,
+    required this.initialGyroscopeValues,
     required this.deviceModel,
     required this.uniqueID,
     required this.luxValue,
@@ -217,49 +288,127 @@ class DisplayPictureScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Display the Picture')),
-      body: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 20),
-            Center(
-              child: SizedBox(
-                width: 350,
-                height: 350,
-                child: Image.file(image, fit: BoxFit.fitWidth),
+      appBar: AppBar(title: const Text('Image Details')),
+      body: Padding(
+        padding: const EdgeInsets.all(8.0),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 20),
+              Center(
+                child: SizedBox(
+                  width: 350,
+                  height: 350,
+                  child: Image.file(image, fit: BoxFit.fitWidth),
+                ),
               ),
-            ),
-            const SizedBox(height: 20),
-            const Center(
-              child: Text(
-                  'Captured sensor values at the time of taking the picture'),
-            ),
-            const SizedBox(height: 30),
-            Text('Accelerometer: $accelerometerValues'),
-            Text('Gyroscope: $gyroscopeValues'),
-            Text('Lux value: $luxValue'),
-            Text('Device Model: $deviceModel'),
-            Text('Unique ID: $uniqueID'),
-            const SizedBox(height: 20),
-            Center(
-              child: ElevatedButton(
-                onPressed: () {
-                  saveData();
-                },
-                child: const Text('Save Data to a File'),
+              const SizedBox(height: 20),
+              const Center(
+                child: Text(
+                  'Captured sensor values at the time of taking the picture',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
               ),
-            ),
-          ],
+              const SizedBox(height: 30),
+              Text('Accelerometer: $initialAccelerometerValues'),
+              const SizedBox(height: 4),
+              Text('Gyroscope: $initialGyroscopeValues'),
+              const SizedBox(height: 20),
+              Text('Lux value: $luxValue'),
+              Text('Device Model: $deviceModel'),
+              Text('Unique ID: $uniqueID'),
+              const SizedBox(height: 20),
+              Center(
+                child: ElevatedButton(
+                  onPressed: () {
+                    saveData(context);
+                  },
+                  child: const Text('Save Data to a File'),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  void saveData() async {
+  void saveData(BuildContext context) async {
     await GallerySaver.saveImage(image.path, albumName: 'SpectrePoC');
     await _createPdf();
     await _createTextFile();
+
+    // Show confirmation dialog
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Data Saved'),
+          content: const Text(
+              'Data has been saved to PDF and TXT file successfully.'),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () {
+                Navigator.of(context).pop(); // Dismiss the dialog
+              },
+            ),
+            TextButton(
+              child: const Text('Confirm'),
+              onPressed: () {
+                Navigator.of(context).pop(); // Dismiss the dialog
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _createTextFile() async {
+    final directory = await _getDirectory();
+    if (directory == null) {
+      print('Unable to get directory');
+      return;
+    }
+
+    final String dataFilePath = '${directory.path}/spectre_poc/$imageName.txt';
+    final File file = File(dataFilePath);
+
+    // Check if the directory exists; if not, create it
+    final Directory textDirectory = file.parent;
+    if (!await textDirectory.exists()) {
+      await textDirectory.create(recursive: true);
+    }
+
+    // Open the file for writing
+    final IOSink sink = file.openWrite();
+
+    // Write the initial information
+    sink.writeln('imageName: $imageName');
+    sink.writeln('luxValue: $luxValue');
+    sink.writeln('deviceModel: $deviceModel');
+    sink.writeln('uniqueID: $uniqueID');
+    sink.writeln(); // New line
+
+    // Write the header
+    sink.writeln('time,a1,a2,a3,g1,g2,g3');
+
+    // Write the initial sensor values
+    sink.writeln(
+        '0,${initialAccelerometerValues[0]},${initialAccelerometerValues[1]},${initialAccelerometerValues[2]},${initialGyroscopeValues[0]},${initialGyroscopeValues[1]},${initialGyroscopeValues[2]}');
+
+    // Write the delayed sensor values
+    for (int i = 0; i < delayedAccelerometerValues.length; i++) {
+      final time = (i + 1) * 5; // Assuming 10 milliseconds interval
+      sink.writeln(
+          '$time,${delayedAccelerometerValues[i][0]},${delayedAccelerometerValues[i][1]},${delayedAccelerometerValues[i][2]},${delayedGyroscopeValues[i][0]},${delayedGyroscopeValues[i][1]},${delayedGyroscopeValues[i][2]}');
+    }
+
+    // Close the file
+    await sink.close();
+    print('Text file saved to $dataFilePath');
   }
 
   Future<void> _createPdf() async {
@@ -282,27 +431,76 @@ class DisplayPictureScreen extends StatelessWidget {
     // Load the image from file (Make sure to provide the correct path)
     final imageFile = image;
     final imageBytes = imageFile.readAsBytesSync();
-    final imageToSave = pw.MemoryImage(imageBytes);
+    // final imageToSave = pw.MemoryImage(imageBytes);
 
-    // Add content to the PDF
-    pdf.addPage(
-      pw.Page(
-        build: (pw.Context context) {
-          return pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              // pw.Image(imageToSave),
-              pw.Text(imageName),
-              pw.Text('Accelerometer: $accelerometerValues'),
-              pw.Text('Gyroscope: $gyroscopeValues'),
-              pw.Text('Lux value: $luxValue'),
-              pw.Text('Device Model: $deviceModel'),
-              pw.Text('Unique ID: $uniqueID'),
-            ],
-          );
-        },
-      ),
-    );
+    // Function to add a page with content
+    void addPageContent(pw.Document pdf, int startIndex, int endIndex) {
+      pdf.addPage(
+        pw.Page(
+          build: (pw.Context context) {
+            return pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                // pw.Image(imageToSave),
+                pw.Text(
+                  'Image name: $imageName',
+                  style: pw.TextStyle(
+                      fontWeight: pw.FontWeight.bold, fontSize: 20),
+                ),
+                pw.Text('-----------------------------------------------'),
+                pw.SizedBox(height: 20),
+                pw.Text('Lux value: $luxValue'),
+                pw.Text('Device Model: $deviceModel'),
+                pw.Text('Unique ID: $uniqueID'),
+                pw.SizedBox(height: 20),
+
+                pw.Text(
+                  'Sensor values at the time of taking the picture',
+                  style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+                ),
+                pw.SizedBox(height: 10),
+                pw.Text('Accelerometer: $initialAccelerometerValues'),
+                pw.SizedBox(height: 4),
+                pw.Text('Gyroscope: $initialGyroscopeValues'),
+                pw.SizedBox(height: 20),
+
+                pw.Text('Sensor values during the delay of 200 milliseconds',
+                    style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+                pw.SizedBox(height: 10),
+                for (int i = startIndex; i < endIndex; i++)
+                  pw.Column(
+                    crossAxisAlignment: pw.CrossAxisAlignment.start,
+                    children: [
+                      pw.Text('Time: ${i * 5} milliseconds'),
+                      pw.Text(
+                          'Accelerometer: ${delayedAccelerometerValues[i]}'),
+                      pw.Text('Gyroscope: ${delayedGyroscopeValues[i]}'),
+                      pw.SizedBox(height: 8),
+                    ],
+                  ),
+
+                pw.SizedBox(height: 20),
+              ],
+            );
+          },
+        ),
+      );
+    }
+
+    // Determine the number of pages needed
+    const int itemsPerPage = 10; // Adjust this value based on your layout
+    int totalItems = delayedAccelerometerValues.length;
+    int totalPages = (totalItems / itemsPerPage).ceil();
+
+    // Add pages with content
+    for (int pageIndex = 0; pageIndex < totalPages; pageIndex++) {
+      int startIndex = pageIndex * itemsPerPage;
+      int endIndex = startIndex + itemsPerPage;
+      if (endIndex > totalItems) {
+        endIndex = totalItems;
+      }
+      addPageContent(pdf, startIndex, endIndex);
+    }
 
     // Write or append to the PDF file
     try {
@@ -311,44 +509,6 @@ class DisplayPictureScreen extends StatelessWidget {
     } catch (e) {
       print('Error writing PDF to file: $e');
     }
-  }
-
-  Future<void> _createTextFile() async {
-    final directory = await _getDirectory();
-    if (directory == null) {
-      print('Unable to get directory');
-      return;
-    }
-
-    final String dataFilePath = '${directory.path}/spectre_poc/image_data.txt';
-    final File file = File(dataFilePath);
-
-    // Check if the directory exists; if not, create it
-    final Directory textDirectory = file.parent;
-    if (!await textDirectory.exists()) {
-      await textDirectory.create(recursive: true);
-    }
-
-    final String sensorData = '''
-    $imageName
-    Accelerometer: $accelerometerValues
-    Gyroscope: $gyroscopeValues
-    Lux value: $luxValue
-    Device Model: $deviceModel
-    Unique ID: $uniqueID
-
-    ''';
-
-    // Write or append to the text file
-    if (await file.exists()) {
-      // File exists, append to it
-      await file.writeAsString(sensorData, mode: FileMode.append);
-    } else {
-      // File does not exist, create and write
-      await file.writeAsString(sensorData);
-    }
-
-    print('Text file saved to $dataFilePath');
   }
 
   Future<Directory?> _getDirectory() async {
